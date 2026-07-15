@@ -2,5 +2,5 @@ pandas
 numpy
 sentence-transformers
 faiss-cpu
-gradio
+streamlit
 google-generativeai
