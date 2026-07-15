@@ -72,7 +72,7 @@ if query:
                 if api_key:
                     try:
                         genai.configure(api_key=api_key)
-                        llm = genai.GenerativeModel('gemini-pro')
+                        llm = genai.GenerativeModel('gemini-1.5-flash')
                         contexto = "\n".join(reranked['summaries'].tolist()[:3])
                         prompt = f"Contexto: {contexto}\n\nPregunta: {query}\n\nResponde detalladamente basándote en el contexto."
                         response = llm.generate_content(prompt)
