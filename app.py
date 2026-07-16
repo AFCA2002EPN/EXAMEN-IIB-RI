@@ -1,90 +1,110 @@
 import streamlit as st
+import os
 import pandas as pd
 import numpy as np
 import faiss
-import os
-from sentence_transformers import SentenceTransformer, CrossEncoder
 import google.generativeai as genai
+from sentence_transformers import SentenceTransformer
 
-# 1. Configuración inicial de la página
-st.set_page_config(page_title="arXiv RAG Assistant", layout="wide")
+# --- Carga de datos y modelos ---
+# Asegúrate de que estos archivos estén en el mismo directorio que streamlit_app.py al desplegar
+# El archivo 'arxiv_data.csv' debe estar disponible en la raíz del proyecto.
+# Puedes usar st.cache_data para cargar estos datos una sola vez y mejorar el rendimiento
 
-# 2. Carga de modelos con caché para no saturar la memoria
 @st.cache_resource
-def load_models():
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-    reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-    return model, reranker
+def load_data_and_models():
+    df = pd.read_csv("arxiv_data.csv", engine='python', on_bad_lines='skip', encoding='utf-8')
 
-# 3. Carga de datos e índice CON LÍMITE DE 200 PARA EVITAR COLAPSO
-@st.cache_resource
-def load_data_and_index():
-    # El .head(200) salva la memoria RAM del servidor
-    df = pd.read_csv('arxiv_data.csv', engine='python', on_bad_lines='skip', encoding='utf-8').head(200)
-    df['text_to_embed'] = df['titles'].fillna('') + ' ' + df['summaries'].fillna('')
-    
-    model, _ = load_models()
-    embeddings = model.encode(df['text_to_embed'].tolist())
-    dimension = embeddings.shape[1]
-    
+    document_embeddings = np.load("document_embeddings.npy")
+
+    dimension = document_embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
-    index.add(np.ascontiguousarray(embeddings.astype('float32')))
-    return df, index
+    index.read_index("faiss_index.faiss")
 
-# 4. Inicializar modelos y datos
-model, reranker_model = load_models()
-df, index = load_data_and_index()
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    return df, document_embeddings, index, model
 
-# 5. Funciones de búsqueda RAG
-def semantic_search(query, top_k=5):
+df, document_embeddings, index, model = load_data_and_models()
+
+# --- Configuración de la API de Gemini ---
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+if not GOOGLE_API_KEY:
+    st.error("La variable de entorno GOOGLE_API_KEY no está configurada. \nPor favor, configúrala en tu plataforma de despliegue.")
+    st.stop()
+genai.configure(api_key=GOOGLE_API_KEY)
+
+# --- Funciones del Sistema RAG (estas son las mismas que en app.py) ---
+def semantic_search(query, top_k=10):
     query_embedding = model.encode([query])
     distances, indices = index.search(np.ascontiguousarray(query_embedding.astype('float32')), top_k)
     results = df.iloc[indices[0]].copy()
     results['distance'] = distances[0]
     return results
 
-def rerank_documents(query, retrieved_df):
-    pairs = [[query, row['summaries']] for _, row in retrieved_df.iterrows()]
-    scores = reranker_model.predict(pairs)
-    retrieved_df['rerank_score'] = scores
-    return retrieved_df.sort_values(by='rerank_score', ascending=False)
+def recuperar_contexto(query, top_k=5):
+    retrieved_docs = semantic_search(query, top_k=top_k)
+    if retrieved_docs.empty:
+        return "", pd.DataFrame()
+    contexto_str = "\n\n".join(retrieved_docs['summaries'].tolist())
+    return contexto_str, retrieved_docs
 
-# 6. Interfaz Visual de Usuario
-st.title("🔍 Asistente de Investigación arXiv (RAG)")
-query = st.text_input("¿Qué deseas investigar hoy?")
+def generar_respuesta_rag(query, contexto):
+    if not contexto or contexto.strip() == "":
+        return "Lo siento, el corpus actual no contiene información suficiente para responder a esta consulta."
 
-if query:
-    with st.spinner("Procesando consulta y buscando documentos..."):
-        results = semantic_search(query, top_k=5)
-        reranked = rerank_documents(query, results)
-        best_score = reranked['rerank_score'].max()
-        
-        if best_score < -5.0:
-            st.warning("⚠️ No he encontrado información relevante en el corpus de 200 documentos cargados.")
-        else:
-            col1, col2 = st.columns([2, 1])
-            
+    system_prompt = '''Eres un asistente académico experto en análisis de artículos científicos. \n    Tu tarea es responder a la pregunta del usuario utilizando ÚNICAMENTE la información provista en el "Contexto extraído de los artículos". \n    Si la respuesta no se encuentra en el contexto, debes indicar explícitamente que el corpus no tiene información suficiente para responder. \n    No utilices tu conocimiento previo ni inventes información.'''
+
+    llm_model = genai.GenerativeModel(
+        model_name='gemini-pro-latest',
+        system_instruction=system_prompt,
+        generation_config=genai.GenerationConfig(
+            temperature=0.2,
+            max_output_tokens=1024
+        )
+    )
+
+    user_message = f"Contexto extraído de los artículos:\n{contexto}\n\nPregunta del usuario: {query}"
+
+    try:
+        response = llm_model.generate_content(user_message, request_options={'timeout': 180})
+        return response.text
+    except Exception as e:
+        return f"Error al generar la respuesta con Gemini: {str(e)}"
+
+
+# --- Interfaz de Usuario con Streamlit ---
+st.set_page_config(page_title="Sistema RAG - arXiv", layout="wide")
+st.title("📚 Asistente de Recuperación Científica (RAG) con Streamlit")
+st.markdown("Ingresa tu consulta sobre inteligencia artificial, machine learning o ciencias de la computación. El sistema buscará en el corpus de **arXiv** y generará una respuesta basada en las evidencias encontradas.")
+
+user_query = st.text_area(
+    "Escribe tu consulta aquí:",
+    placeholder="Ej. What are the main applications of Graph Neural Networks?",
+    height=100
+)
+
+if st.button("Enviar Consulta"):
+    if user_query:
+        with st.spinner("Buscando documentos y generando respuesta..."):
+            contexto_recuperado, evidencias_df = recuperar_contexto(user_query)
+            respuesta_llm = generar_respuesta_rag(user_query, contexto_recuperado)
+
+            col1, col2 = st.columns(2)
+
             with col1:
-                st.subheader("Respuesta del Asistente")
-                # Intenta leer la API Key desde los secrets de Streamlit o variables de entorno
-                api_key = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY"))
-                
-                if api_key:
-                    try:
-                        genai.configure(api_key=api_key)
-                        llm = genai.GenerativeModel('gemini-1.0-pro')
-                        contexto = "\n".join(reranked['summaries'].tolist()[:3])
-                        prompt = f"Contexto: {contexto}\n\nPregunta: {query}\n\nResponde detalladamente basándote en el contexto."
-                        response = llm.generate_content(prompt)
-                        st.markdown(response.text)
-                    except Exception as e:
-                        st.error(f"Error al generar respuesta con Gemini: {str(e)}")
-                else:
-                    st.info("Por favor, configure su GOOGLE_API_KEY en los Secrets de la aplicación.")
-            
+                st.subheader("Respuesta Generada")
+                st.write(respuesta_llm)
+
             with col2:
-                st.subheader("Fuentes Recuperadas")
-                for _, row in reranked.iterrows():
-                    with st.expander(f"📄 {row['titles'][:50]}..."):
-                        st.markdown(f"**Relevancia:** `{row['rerank_score']:.2f}`")
-                        st.write(row['summaries'])
+                st.subheader("Evidencias")
+                if evidencias_df.empty:
+                    st.info("No se encontraron documentos relevantes en el corpus para esta consulta.")
+                else:
+                    for i, row in evidencias_df.iterrows():
+                        st.markdown(f"**Documento {i+1}: {row['titles']}**")
+                        st.markdown(f"*Similitud (Distancia L2): {row['distance']:.4f}*")
+                        fragmento = row['summaries'][:300] + "..." if len(row['summaries']) > 300 else row['summaries']
+                        st.markdown(f"> {fragmento}")
+                        st.markdown("---")
+    else:
+        st.warning("Por favor, introduce una consulta.")
