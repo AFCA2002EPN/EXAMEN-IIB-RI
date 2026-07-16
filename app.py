@@ -21,7 +21,7 @@ def load_data_and_models():
     index = faiss.IndexFlatL2(dimension)
     index = faiss.read_index("faiss_index.faiss")
 
->>>>>>> 0a3194c69906d2d453c1d9ef0470a5b8cbc78c16
+
     model = SentenceTransformer('all-MiniLM-L6-v2')
     reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
     return model, reranker
