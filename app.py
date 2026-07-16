@@ -19,7 +19,7 @@ def load_data_and_models():
 
     dimension = document_embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
-    index.read_index("faiss_index.faiss")
+    index = faiss.read_index("faiss_index.faiss")
 
     model = SentenceTransformer('all-MiniLM-L6-v2')
     return df, document_embeddings, index, model
