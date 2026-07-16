@@ -1,6 +1,7 @@
+
 pandas
 numpy
-sentence-transformers
 faiss-cpu
-streamlit
+sentence-transformers
+gradio
 google-generativeai
